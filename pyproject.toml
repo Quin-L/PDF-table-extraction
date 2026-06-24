@@ -1,0 +1,13 @@
+[project]
+name = "adobe-protected-pdf-table-extraction"
+version = "0.1.0"
+requires-python = ">=3.13"
+dependencies = [
+    "ipykernel>=7.3.0",
+    "matplotlib>=3.11.0",
+    "numpy>=2.5.0",
+    "opencv-python>=4.13.0.92",
+    "openpyxl>=3.1.5",
+    "pandas>=3.0.3",
+    "pillow>=12.2.0",
+]
