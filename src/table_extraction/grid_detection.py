@@ -30,15 +30,20 @@ HOUGH_MERGE_TOLERANCE_PX = 5
 HOUGH_MIN_WIDTH_COVERAGE = 0.70
 
 
-def process_PIL_image_for_cv2(image: Image.Image, enhance_faint_lines: bool = False) -> np.ndarray:
+def process_PIL_image_for_cv2(
+    image: Image.Image,
+    enhance_faint_lines: bool = False,
+    preserve_blue_rules: bool = False,
+) -> np.ndarray:
     """Convert a PIL image into an inverted binary image for OpenCV line detection."""
-    cv_image = cv2.cvtColor(np.array(image.convert("RGB")), cv2.COLOR_RGB2GRAY)
+    rgb_image = np.array(image.convert("RGB"))
+    cv_image = cv2.cvtColor(rgb_image, cv2.COLOR_RGB2GRAY)
 
     if enhance_faint_lines:
         clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
         cv_image = clahe.apply(cv_image)
         cv_image = cv2.fastNlMeansDenoising(cv_image, None, h=10, templateWindowSize=7, searchWindowSize=21)
-        return cv2.adaptiveThreshold(
+        binary = cv2.adaptiveThreshold(
             cv_image,
             255,
             cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
@@ -46,9 +51,33 @@ def process_PIL_image_for_cv2(image: Image.Image, enhance_faint_lines: bool = Fa
             blockSize=15,
             C=2,
         )
+        if preserve_blue_rules:
+            return cv2.bitwise_or(binary, extract_blue_rule_mask(image))
+        return binary
 
     cv_image = cv2.GaussianBlur(cv_image, GAUSSIAN_BLUR_KERNEL, 0)
-    return cv2.threshold(cv_image, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1]
+    binary = cv2.threshold(cv_image, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1]
+    if preserve_blue_rules:
+        return cv2.bitwise_or(binary, extract_blue_rule_mask(image))
+    return binary
+
+
+def extract_blue_rule_mask(image: Image.Image) -> np.ndarray:
+    """Return a binary mask for dark blue table-rule pixels."""
+    rgb = np.array(image.convert("RGB")).astype(np.int16)
+    red = rgb[:, :, 0]
+    green = rgb[:, :, 1]
+    blue = rgb[:, :, 2]
+
+    blue_rule_pixels = (
+        (red < 90)
+        & (green < 110)
+        & (blue > 60)
+        & (blue < 170)
+        & (blue > red + 20)
+        & (blue > green + 10)
+    )
+    return (blue_rule_pixels.astype(np.uint8) * 255)
 
 
 def remove_light_watermark(image: Image.Image, gray_threshold: int = 200) -> Image.Image:
@@ -78,7 +107,16 @@ def detect_horizontal_vertical_lines(
     horizontal_dilation_iterations: int | None = None,
     vertical_dilation_iterations: int | None = None,
     horizontal_detector: str = HORIZONTAL_DETECTOR,
-) -> tuple[list[dict], list[dict], np.ndarray | None, np.ndarray | None, list[dict], list[dict], dict[str, Any] | None]:
+) -> tuple[
+    list[dict],
+    list[dict],
+    np.ndarray | None,
+    np.ndarray | None,
+    list[dict],
+    list[dict],
+    dict[str, Any] | None,
+    dict[str, Any] | None,
+]:
     """Detect horizontal and vertical table lines from an inverted binary image."""
     horizontal_dilation_iterations = (
         dilation_iterations if horizontal_dilation_iterations is None else horizontal_dilation_iterations
@@ -124,7 +162,7 @@ def detect_horizontal_vertical_lines(
         horizontal_lines, horizontal_img, failed_horizontal, horizontal_debug = [], None, [], None
 
     if detect_vertical:
-        vertical_lines, vertical_img, failed_vertical = extract_vertical_lines(
+        vertical_lines, vertical_img, failed_vertical, vertical_debug = extract_vertical_lines(
             binary_img=thres_img,
             kernel_divisor=vertical_kernel_divisor,
             min_length_pct=vertical_min_length_pct,
@@ -134,9 +172,18 @@ def detect_horizontal_vertical_lines(
             dilation_iterations=vertical_dilation_iterations,
         )
     else:
-        vertical_lines, vertical_img, failed_vertical = [], None, []
+        vertical_lines, vertical_img, failed_vertical, vertical_debug = [], None, [], None
 
-    return horizontal_lines, vertical_lines, horizontal_img, vertical_img, failed_horizontal, failed_vertical, horizontal_debug
+    return (
+        horizontal_lines,
+        vertical_lines,
+        horizontal_img,
+        vertical_img,
+        failed_horizontal,
+        failed_vertical,
+        horizontal_debug,
+        vertical_debug,
+    )
 
 
 def create_grid(
@@ -282,7 +329,16 @@ def extract_horizontal_lines(
         x, y, w, h = cv2.boundingRect(contour)
         aspect_ratio = w / h if h > 0 else 0
         if h <= max_thickness and aspect_ratio >= min_aspect_ratio:
-            candidate_lines.append({"x": x, "y": y, "width": w, "height": h, "y_center": y + h // 2})
+            candidate_lines.append(
+                {
+                    "x": x,
+                    "y": y,
+                    "width": w,
+                    "height": h,
+                    "y_center": y + h // 2,
+                    "source": "morphology",
+                }
+            )
         else:
             failed_lines.append(
                 {
@@ -294,6 +350,13 @@ def extract_horizontal_lines(
                     "reason": "thickness" if h > max_thickness else "aspect",
                 }
             )
+
+    thick_band_edges = _recover_horizontal_edges_from_thick_bands(
+        failed_lines,
+        img_width=img_width,
+        min_width_px=min_length_px,
+    )
+    candidate_lines.extend(thick_band_edges)
 
     candidate_lines = sorted(candidate_lines, key=lambda line: line["y_center"])
     candidate_lines_pre_merge = [line.copy() for line in candidate_lines]
@@ -343,7 +406,9 @@ def extract_horizontal_lines(
         "length_failed": [line.copy() for line in length_failed],
         "proximity_removed": [line.copy() for line in proximity_removed],
         "boundary_removed": [line.copy() for line in boundary_removed],
+        "thick_band_edges": [line.copy() for line in thick_band_edges],
         "final_lines": [line.copy() for line in lines],
+        "source_counts": _count_by_source(lines),
         "thresholds": {
             "img_width": img_width,
             "img_height": img_height,
@@ -496,6 +561,19 @@ def extract_horizontal_lines_combined(
             continue
         combined_lines.append({**hough_line, "source": "hough_only"})
 
+    thick_band_edges = _recover_horizontal_edges_from_thick_bands(
+        morph_failed,
+        img_width=binary_img.shape[1],
+        min_width_px=int(binary_img.shape[1] * min_length_pct),
+    )
+    if thick_band_edges:
+        combined_lines = [
+            line
+            for line in combined_lines
+            if not _is_hough_only_inside_thick_band(line, morph_failed)
+        ]
+        combined_lines.extend(thick_band_edges)
+
     combined_lines = sorted(combined_lines, key=lambda line: line["y_center"])
     combined_lines = merge_close_lines(combined_lines, merge_tolerance, axis="horizontal")
     for line in combined_lines:
@@ -517,6 +595,7 @@ def extract_horizontal_lines_combined(
         "final_lines": [line.copy() for line in combined_lines],
         "morphology_count": len(morph_lines),
         "hough_count": len(hough_lines),
+        "thick_band_edge_count": len(thick_band_edges),
         "combined_count": len(combined_lines),
         "source_counts": _count_by_source(combined_lines),
     }
@@ -532,26 +611,29 @@ def extract_vertical_lines(
     min_aspect_ratio: float = MIN_LINE_ASPECT_RATIO,
     merge_tolerance: int = GRID_LINE_MERGE_TOLERANCE,
     dilation_iterations: int = DILATION_ITERATIONS,
-) -> tuple[list[dict], np.ndarray, list[dict]]:
+) -> tuple[list[dict], np.ndarray, list[dict], dict[str, Any]]:
     img_height, img_width = binary_img.shape
     kernel_len = max(1, img_height // kernel_divisor)
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, kernel_len))
 
     vertical = cv2.erode(binary_img.copy(), kernel, iterations=1)
     vertical = cv2.dilate(vertical, kernel, iterations=dilation_iterations)
+    morph_img = vertical.copy()
     contours, _ = cv2.findContours(vertical, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
     min_length_px = int(img_height * min_length_pct)
     candidate_lines = []
-    failed_lines = []
+    contour_failed = []
 
     for contour in contours:
         x, y, w, h = cv2.boundingRect(contour)
         aspect_ratio = h / w if w > 0 else 0
         if w <= max_thickness and aspect_ratio >= min_aspect_ratio:
-            candidate_lines.append({"x": x, "y": y, "width": w, "height": h, "x_center": x + w // 2})
+            candidate_lines.append(
+                {"x": x, "y": y, "width": w, "height": h, "x_center": x + w // 2, "source": "morphology"}
+            )
         else:
-            failed_lines.append(
+            contour_failed.append(
                 {
                     "x": x,
                     "y": y,
@@ -563,8 +645,10 @@ def extract_vertical_lines(
             )
 
     candidate_lines = sorted(candidate_lines, key=lambda line: line["x_center"])
+    candidate_lines_pre_merge = [line.copy() for line in candidate_lines]
     if merge_tolerance > 0:
         candidate_lines = merge_close_lines(candidate_lines, merge_tolerance, axis="vertical")
+    candidate_lines_post_merge = [line.copy() for line in candidate_lines]
 
     lines = []
     length_failed = []
@@ -587,13 +671,34 @@ def extract_vertical_lines(
         filtered_lines.append(line)
 
     lines = sorted(filtered_lines, key=lambda line: line["x_center"])
-    failed_lines = sorted(failed_lines + length_failed + proximity_removed, key=lambda line: line["x_center"])
+    failed_lines = sorted(contour_failed + length_failed + proximity_removed, key=lambda line: line["x_center"])
 
     filtered_img = np.zeros_like(binary_img)
     for line in lines:
         filtered_img[line["y"] : line["y"] + line["height"], line["x"] : line["x"] + line["width"]] = 255
 
-    return lines, filtered_img, failed_lines
+    debug_info = {
+        "morph_img": morph_img,
+        "contour_count": len(contours),
+        "contour_failed": [line.copy() for line in contour_failed],
+        "candidate_lines_pre_merge": candidate_lines_pre_merge,
+        "candidate_lines_post_merge": candidate_lines_post_merge,
+        "length_failed": [line.copy() for line in length_failed],
+        "proximity_removed": [line.copy() for line in proximity_removed],
+        "final_lines": [line.copy() for line in lines],
+        "source_counts": _count_by_source(lines),
+        "thresholds": {
+            "img_width": img_width,
+            "img_height": img_height,
+            "kernel_len": kernel_len,
+            "min_length_px": min_length_px,
+            "max_thickness": max_thickness,
+            "min_aspect_ratio": min_aspect_ratio,
+            "merge_tolerance": merge_tolerance,
+            "min_separation_px": min_separation_px,
+        },
+    }
+    return lines, filtered_img, failed_lines, debug_info
 
 
 def merge_close_lines(lines: list[dict], tolerance: int, axis: str = "horizontal") -> list[dict]:
@@ -647,6 +752,53 @@ def _measure_width_coverage(binary_img: np.ndarray, y_center: int, band_px: int)
     x_left = int(np.argmax(column_has_ink))
     x_right = int(img_w - 1 - np.argmax(column_has_ink[::-1]))
     return (x_right - x_left + 1) / img_w
+
+
+def _recover_horizontal_edges_from_thick_bands(
+    failed_lines: list[dict],
+    *,
+    img_width: int,
+    min_width_px: int,
+) -> list[dict]:
+    """Recover table rules from filled header bands rejected as too thick."""
+    recovered = []
+    for line in failed_lines:
+        if line.get("reason") != "thickness":
+            continue
+        if int(line.get("width", 0)) < min_width_px:
+            continue
+
+        x = int(line.get("x", 0))
+        width = int(line.get("width", img_width))
+        y_top = int(line["y"])
+        y_bottom = int(line["y"] + line["height"] - 1)
+        for edge_name, y in [("top", y_top), ("bottom", y_bottom)]:
+            recovered.append(
+                {
+                    "x": x,
+                    "y": y,
+                    "width": width,
+                    "height": 1,
+                    "y_center": y,
+                    "source": f"morphology_thick_{edge_name}_edge",
+                }
+            )
+    return recovered
+
+
+def _is_hough_only_inside_thick_band(line: dict, thick_bands: list[dict]) -> bool:
+    if line.get("source") != "hough_only":
+        return False
+
+    y_values = [int(line.get("y_center", 0)), int(line.get("y", line.get("y_center", 0)))]
+    for band in thick_bands:
+        if band.get("reason") != "thickness":
+            continue
+        band_top = int(band["y"])
+        band_bottom = int(band["y"] + band["height"] - 1)
+        if any(band_top <= y <= band_bottom for y in y_values):
+            return True
+    return False
 
 
 def _find_nearest_line_by_y(

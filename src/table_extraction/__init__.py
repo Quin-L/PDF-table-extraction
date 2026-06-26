@@ -1,3 +1,9 @@
+from .cell_extraction import (
+    cell_crops_to_dataframe,
+    crop_cells_from_grid,
+    print_cell_crop_summary,
+    show_cell_crop_preview,
+)
 from .grid_detection import (
     create_grid,
     detect_horizontal_vertical_lines,
@@ -5,6 +11,7 @@ from .grid_detection import (
     extract_horizontal_lines_combined,
     extract_horizontal_lines_hough,
     extract_horizontal_lines,
+    extract_blue_rule_mask,
     extract_vertical_lines,
     crop_pil_to_bbox,
     get_column_bboxs,
@@ -15,7 +22,34 @@ from .grid_detection import (
     remove_light_watermark,
 )
 from .io import load_input_pages, render_pdf_to_images
+from .ocr import (
+    ocr_cell_crops,
+    ocr_cell_image,
+    preprocess_cell_for_ocr,
+    show_ocr_sample_cells,
+    show_ocr_sample_cells_with_text,
+)
+from .paddle_ocr import paddle_ocr_cell_crops
+from .preprocessing_debug import build_preprocessing_stages, show_preprocessing_stages
+from .table_assembly import (
+    cell_ocr_to_dataframe,
+    clean_extracted_table,
+    DocumentTableExtractionResult,
+    export_extracted_tables,
+    ocr_one_page_to_dataframe,
+    process_document_tables,
+    print_multi_page_summary,
+    print_one_page_dataframe_summary,
+    process_pages_to_dataframes,
+)
 from .visualization import visualize_grid
+from .vlm_fallback import (
+    add_mean_confidence,
+    correct_low_confidence_cells_with_vlm,
+    print_vlm_fallback_summary,
+    select_low_confidence_ocr,
+    vlm_ocr_cell_image,
+)
 from .workflow import (
     TableBoundaryResult,
     TableGridResult,
@@ -26,21 +60,26 @@ from .workflow import (
     full_page_line_audit,
     print_table_boundary_summary,
     print_table_grid_summary,
+    print_vertical_line_funnel,
     show_cropped_table_grid,
     show_cropped_table_grid_review,
     show_full_page_line_detection,
     show_horizontal_detector_comparison,
     show_line_detection_overlay,
     show_table_boundary,
+    show_vertical_line_crop_vs_fullpage,
 )
 
 __all__ = [
     "create_grid",
+    "cell_crops_to_dataframe",
+    "crop_cells_from_grid",
     "detect_horizontal_vertical_lines",
     "drop_lines_near_image_boundary",
     "extract_horizontal_lines_combined",
     "extract_horizontal_lines_hough",
     "extract_horizontal_lines",
+    "extract_blue_rule_mask",
     "extract_vertical_lines",
     "crop_pil_to_bbox",
     "get_column_bboxs",
@@ -51,7 +90,29 @@ __all__ = [
     "remove_light_watermark",
     "load_input_pages",
     "render_pdf_to_images",
+    "ocr_cell_crops",
+    "ocr_cell_image",
+    "paddle_ocr_cell_crops",
+    "preprocess_cell_for_ocr",
+    "show_ocr_sample_cells",
+    "show_ocr_sample_cells_with_text",
+    "build_preprocessing_stages",
+    "show_preprocessing_stages",
+    "cell_ocr_to_dataframe",
+    "clean_extracted_table",
+    "DocumentTableExtractionResult",
+    "export_extracted_tables",
+    "ocr_one_page_to_dataframe",
+    "process_document_tables",
+    "print_multi_page_summary",
+    "print_one_page_dataframe_summary",
+    "process_pages_to_dataframes",
     "visualize_grid",
+    "add_mean_confidence",
+    "correct_low_confidence_cells_with_vlm",
+    "print_vlm_fallback_summary",
+    "select_low_confidence_ocr",
+    "vlm_ocr_cell_image",
     "TableBoundaryResult",
     "TableGridResult",
     "cropped_grid_line_audit",
@@ -61,10 +122,14 @@ __all__ = [
     "full_page_line_audit",
     "print_table_boundary_summary",
     "print_table_grid_summary",
+    "print_vertical_line_funnel",
     "show_cropped_table_grid",
     "show_cropped_table_grid_review",
+    "print_cell_crop_summary",
+    "show_cell_crop_preview",
     "show_full_page_line_detection",
     "show_horizontal_detector_comparison",
     "show_line_detection_overlay",
     "show_table_boundary",
+    "show_vertical_line_crop_vs_fullpage",
 ]
