@@ -3,6 +3,7 @@ from __future__ import annotations
 import shutil
 import subprocess
 import tempfile
+import textwrap
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
@@ -143,8 +144,10 @@ def show_ocr_sample_cells_with_text(
     cell_crops: list[dict[str, Any]],
     ocr_df: pd.DataFrame,
     *,
-    columns: int = 10,
+    columns: int | None = None,
     max_text_chars: int = 100,
+    max_rows_per_figure: int = 8,
+    annotation_fontsize: int = 13,
     image_transform: Callable[[Image.Image], Image.Image] | None = None,
 ) -> None:
     """Show OCR sample cells annotated with extracted text and confidence."""
@@ -154,45 +157,79 @@ def show_ocr_sample_cells_with_text(
 
     by_position = {(crop["row"], crop["col"]): crop for crop in cell_crops}
     records = ocr_df.to_dict(orient="records")
-    columns = max(1, min(columns, len(records)))
-    fig_rows = (len(records) + columns - 1) // columns
-    fig, axes = plt.subplots(fig_rows, columns, figsize=(5.2 * columns, 3.2 * fig_rows))
-    axes_array = [axes] if len(records) == 1 else axes.ravel()
-
-    for ax, record in zip(axes_array, records):
-        crop = by_position.get((record["row"], record["col"]))
-        if crop is not None:
-            display_image = crop["image"]
-            if image_transform is not None:
-                display_image = image_transform(display_image)
-            ax.imshow(display_image)
-
-        text = str(record.get("text") or "").replace("\n", " ")
-        if len(text) > max_text_chars:
-            text = text[: max_text_chars - 1] + "..."
-        confidence = _format_confidence(record.get("scores"))
-        annotation = f"{text or '[no text]'}({confidence})"
-        title = f"r{record['row']} c{record['col']}"
-        ax.set_title(title, fontsize=9)
-        ax.text(
-            0.01,
-            0.01,
-            annotation,
-            transform=ax.transAxes,
-            fontsize=10,
-            color="red",
-            va="bottom",
-            ha="left",
-            bbox={"facecolor": "white", "edgecolor": "#333333", "alpha": 0.88, "pad": 3},
-            wrap=True,
+    by_record_position = {
+        (int(record["row"]), int(record["col"])): record for record in records
+    }
+    if columns is None:
+        max_col = max(
+            [int(crop["col"]) for crop in cell_crops]
+            + [int(record["col"]) for record in records]
         )
-        ax.axis("off")
+        columns = max_col + 1
+    columns = max(1, int(columns))
+    max_rows_per_figure = max(1, int(max_rows_per_figure))
 
-    for ax in axes_array[len(records):]:
-        ax.axis("off")
+    display_rows = sorted({int(record["row"]) for record in records})
+    for start in range(0, len(display_rows), max_rows_per_figure):
+        row_chunk = display_rows[start : start + max_rows_per_figure]
+        fig_rows = len(row_chunk)
+        fig_width = max(8.0, 1.65 * columns)
+        fig_height = max(2.0, 1.45 * fig_rows)
+        fig, axes = plt.subplots(
+            fig_rows,
+            columns,
+            figsize=(fig_width, fig_height),
+            squeeze=False,
+        )
 
-    plt.tight_layout()
-    plt.show()
+        for row_index, row in enumerate(row_chunk):
+            for col in range(columns):
+                ax = axes[row_index][col]
+                crop = by_position.get((row, col))
+                if crop is not None:
+                    display_image = crop["image"]
+                    if image_transform is not None:
+                        display_image = image_transform(display_image)
+                    ax.imshow(display_image)
+
+                record = by_record_position.get((row, col))
+                ax.set_title(f"r{row} c{col}", fontsize=8)
+                if record is not None:
+                    annotation = _format_ocr_annotation(
+                        record,
+                        max_text_chars=max_text_chars,
+                    )
+                    ax.text(
+                        0.02,
+                        0.02,
+                        annotation,
+                        transform=ax.transAxes,
+                        fontsize=annotation_fontsize,
+                        color="red",
+                        va="bottom",
+                        ha="left",
+                        bbox={
+                            "facecolor": "white",
+                            "edgecolor": "#333333",
+                            "alpha": 0.9,
+                            "pad": 2,
+                        },
+                        clip_on=True,
+                    )
+                ax.axis("off")
+
+        plt.tight_layout(pad=0.35)
+        plt.show()
+
+
+def _format_ocr_annotation(record: dict[str, Any], *, max_text_chars: int) -> str:
+    text = str(record.get("text") or "").replace("\n", " ")
+    text = " ".join(text.split())
+    if len(text) > max_text_chars:
+        text = text[: max_text_chars - 1] + "..."
+    confidence = _format_confidence(record.get("scores"))
+    annotation = f"{text or '[no text]'} ({confidence})"
+    return textwrap.fill(annotation, width=18)
 
 
 def _format_confidence(scores: Any) -> str:
