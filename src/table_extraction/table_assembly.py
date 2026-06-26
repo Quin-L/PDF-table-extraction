@@ -14,6 +14,9 @@ from .workflow import detect_grid_from_table_crop, detect_table_boundary_from_pa
 DEFAULT_VLM_MODEL_KEY = "qwen3_vl_32b"
 DEFAULT_VLM_EXECUTION_MODE = "parallel"
 DEFAULT_VLM_MAX_WORKERS = 4
+HEADER_MIN_REPEATED_PAGES = 2
+HEADER_ROW_MATCH_RATIO = 0.7
+BOREHOLE_ID_COLUMN_KEYS = {"boreholeid", "holeid"}
 
 
 @dataclass
@@ -309,6 +312,8 @@ def clean_extracted_table(
             cleaned = cleaned.rename(columns=rename_map)
             text_columns = [rename_map[column] for column in text_columns]
 
+    cleaned = _normalize_borehole_id_columns(cleaned)
+
     non_empty_columns = [
         column
         for column in text_columns
@@ -330,23 +335,32 @@ def _infer_repeated_header_signature(
 
     first_rows = (
         table_df.sort_values(["page_index", "table_row"])
-        .groupby("page_index", as_index=False)
-        .first()
+        .groupby("page_index", as_index=False, sort=False)
+        .head(1)
     )
     if len(first_rows) < 2:
         return None
 
-    signatures = [
-        tuple(str(row[column]).strip() for column in text_columns)
-        for _, row in first_rows.iterrows()
-    ]
-    signature_counts = pd.Series(signatures).value_counts()
-    best_signature = signature_counts.index[0]
-    if signature_counts.iloc[0] < 2:
+    header_values = []
+    repeated_columns = 0
+    for column in text_columns:
+        values = first_rows[column].fillna("").astype(str).str.strip()
+        values = values[values.ne("")]
+        if values.empty:
+            header_values.append("")
+            continue
+
+        value_counts = values.value_counts()
+        best_value = str(value_counts.index[0]).strip()
+        if int(value_counts.iloc[0]) >= HEADER_MIN_REPEATED_PAGES:
+            header_values.append(best_value)
+            repeated_columns += 1
+        else:
+            header_values.append("")
+
+    if repeated_columns == 0:
         return None
-    if not any(value for value in best_signature):
-        return None
-    return tuple(best_signature)
+    return tuple(header_values)
 
 
 def _drop_rows_matching_signature(
@@ -354,11 +368,23 @@ def _drop_rows_matching_signature(
     text_columns: list[str],
     signature: tuple[str, ...],
 ) -> pd.DataFrame:
-    row_signatures = table_df[text_columns].apply(
-        lambda row: tuple(str(value).strip() for value in row),
-        axis=1,
-    )
-    return table_df.loc[row_signatures != signature].copy()
+    expected = {
+        column: str(value).strip()
+        for column, value in zip(text_columns, signature)
+        if str(value).strip()
+    }
+    if not expected:
+        return table_df.copy()
+
+    def is_header_row(row: pd.Series) -> bool:
+        matches = 0
+        for column, value in expected.items():
+            if str(row[column]).strip() == value:
+                matches += 1
+        return matches / len(expected) >= HEADER_ROW_MATCH_RATIO
+
+    header_mask = table_df.apply(is_header_row, axis=1)
+    return table_df.loc[~header_mask].copy()
 
 
 def _make_unique_column_names(header_values: tuple[str, ...]) -> list[str]:
@@ -372,6 +398,28 @@ def _make_unique_column_names(header_values: tuple[str, ...]) -> list[str]:
             name = f"{name}_{count + 1}"
         names.append(name)
     return names
+
+
+def _normalize_borehole_id_columns(table_df: pd.DataFrame) -> pd.DataFrame:
+    output = table_df.copy()
+    for column in output.columns:
+        if not _is_borehole_id_column(column):
+            continue
+        output[column] = (
+            output[column]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+            .str.replace(r"[\s,]+", "_", regex=True)
+            .str.replace(r"_+", "_", regex=True)
+            .str.strip("_")
+        )
+    return output
+
+
+def _is_borehole_id_column(column_name: str) -> bool:
+    normalized = "".join(character for character in str(column_name).lower() if character.isalnum())
+    return normalized in BOREHOLE_ID_COLUMN_KEYS
 
 
 def export_extracted_tables(
