@@ -51,6 +51,7 @@ class TableGridResult(TableBoundaryResult):
     v_debug: dict
     boundary_dropped_h: list[dict]
     boundary_dropped_v: list[dict]
+    vertical_binary_image: np.ndarray
     grid_data: dict
     grid_overlay: np.ndarray
 
@@ -129,13 +130,45 @@ def detect_grid_from_table_crop(
     *,
     boundary_tolerance: int = 8,
     horizontal_detector: str = "combined",
+    reuse_full_binary_for_vertical: bool = True,
 ) -> TableGridResult:
-    """Detect the internal grid inside an already-cropped table."""
+    """Detect the internal grid inside an already-cropped table.
+
+    Horizontal lines are detected on the crop's own re-binarization, which keeps
+    the blue-band header handling unchanged. Vertical lines are, by default,
+    detected on the full-page binary cropped to the table bbox: re-binarizing
+    only the crop recomputes Otsu over a denser histogram and fragments faint
+    column separators below the vertical erosion-kernel height, dropping them
+    (e.g. the borehole-ID / item rule). Set
+    ``reuse_full_binary_for_vertical=False`` for the legacy single-binary path.
+    """
     table_binary_image = boundary_result.table_binary_image
-    h_lines, v_lines, _, _, failed_h, failed_v, h_debug, v_debug = detect_horizontal_vertical_lines(
+    crop_h, crop_w = table_binary_image.shape[:2]
+
+    # Horizontal lines: crop re-binarization (unchanged blue-band handling).
+    h_lines, _, _, _, failed_h, _, h_debug, _ = detect_horizontal_vertical_lines(
         table_binary_image,
+        detect_vertical=False,
         horizontal_detector=horizontal_detector,
     )
+
+    # Vertical lines: reuse the full-page binary so faint separators stay solid.
+    if reuse_full_binary_for_vertical:
+        bbox = boundary_result.table_bbox
+        vertical_binary_image = boundary_result.full_binary_image[
+            bbox["ymin"] : bbox["ymax"], bbox["xmin"] : bbox["xmax"]
+        ]
+        # Guard against any off-by-one between PIL crop and numpy slice.
+        vertical_binary_image = vertical_binary_image[:crop_h, :crop_w]
+    else:
+        vertical_binary_image = table_binary_image
+
+    _, v_lines, _, _, _, failed_v, _, v_debug = detect_horizontal_vertical_lines(
+        vertical_binary_image,
+        detect_horizontal=False,
+        horizontal_detector=horizontal_detector,
+    )
+
     inner_h_lines, inner_v_lines = drop_lines_near_image_boundary(
         h_lines,
         v_lines,
@@ -144,7 +177,6 @@ def detect_grid_from_table_crop(
     )
     # Capture the accepted lines that the boundary filter discards, so the
     # vertical-line funnel can show separators dropped only at this stage.
-    crop_h, crop_w = table_binary_image.shape[:2]
     boundary_dropped_h = [
         {**line, "reason": "image_boundary"}
         for line in h_lines
@@ -189,6 +221,7 @@ def detect_grid_from_table_crop(
         v_debug=v_debug or {},
         boundary_dropped_h=boundary_dropped_h,
         boundary_dropped_v=boundary_dropped_v,
+        vertical_binary_image=vertical_binary_image,
         grid_data=grid_data,
         grid_overlay=grid_overlay,
     )
@@ -203,6 +236,7 @@ def detect_table_grid_from_page(
     watermark_gray_threshold: int = 200,
     horizontal_detector: str = "combined",
     preserve_blue_rules: bool = False,
+    reuse_full_binary_for_vertical: bool = True,
 ) -> TableGridResult:
     """Convenience wrapper for boundary detection followed by grid detection."""
     boundary_result = detect_table_boundary_from_page(
@@ -217,6 +251,7 @@ def detect_table_grid_from_page(
         boundary_result,
         boundary_tolerance=boundary_tolerance,
         horizontal_detector=horizontal_detector,
+        reuse_full_binary_for_vertical=reuse_full_binary_for_vertical,
     )
 
 
